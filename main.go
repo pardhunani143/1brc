@@ -25,7 +25,8 @@ type CityTemp struct {
 }
 
 var (
-	cityTempMap sync.Map
+	cityTempMap = make(map[string]CityTemp)
+	mapMutex    sync.Mutex
 )
 
 func main() {
@@ -77,33 +78,37 @@ func parse(data []string) []Record {
 }
 
 func compute(records []Record) []Record {
+	mapMutex.Lock()
+	defer mapMutex.Unlock()
 	for _, rec := range records {
-		val, _ := cityTempMap.LoadOrStore(rec.City, CityTemp{rec.City, rec.Temperature, rec.Temperature, rec.Temperature, 1})
-		cityTemp := val.(CityTemp)
-
-		if rec.Temperature < cityTemp.Min {
-			cityTemp.Min = rec.Temperature
-		} else if rec.Temperature > cityTemp.Max {
-			cityTemp.Max = rec.Temperature
+		cityTemp, exists := cityTempMap[rec.City]
+		if !exists {
+			cityTemp = CityTemp{rec.City, rec.Temperature, rec.Temperature, rec.Temperature, 1}
+		} else {
+			if rec.Temperature < cityTemp.Min {
+				cityTemp.Min = rec.Temperature
+			} else if rec.Temperature > cityTemp.Max {
+				cityTemp.Max = rec.Temperature
+			}
+			cityTemp.Count++
+			cityTemp.Avg = ((cityTemp.Avg * float64(cityTemp.Count-1)) + rec.Temperature) / float64(cityTemp.Count)
 		}
-		cityTemp.Count++
-		cityTemp.Avg = ((cityTemp.Avg * float64(cityTemp.Count-1)) + rec.Temperature) / float64(cityTemp.Count)
-		cityTempMap.Store(rec.City, cityTemp)
+		cityTempMap[rec.City] = cityTemp
 	}
 	return records
 }
 
 func encode() string {
-	keys := make([]string, 0)
-	cityTempMap.Range(func(key, value interface{}) bool {
-		keys = append(keys, key.(string))
-		return true
-	})
+	mapMutex.Lock()
+	defer mapMutex.Unlock()
+	keys := make([]string, 0, len(cityTempMap))
+	for key := range cityTempMap {
+		keys = append(keys, key)
+	}
 	sort.Strings(keys)
 	result := ""
 	for i, k := range keys {
-		val, _ := cityTempMap.Load(k)
-		temp := val.(CityTemp)
+		temp := cityTempMap[k]
 		if i > 0 {
 			result += ";"
 		}
@@ -137,7 +142,7 @@ func pipeline(fileScanner *bufio.Scanner) {
 
 	// Start a goroutine to scan the file and feed the parseInputCh channel
 	go func() {
-		batchSize := 50
+		batchSize := 100
 		batch := make([]string, 0, batchSize)
 		for fileScanner.Scan() {
 			batch = append(batch, fileScanner.Text())
