@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// measurements.txt Oklahoma City;13.6
 type Record struct {
 	City        string
 	Temperature float64
@@ -26,130 +25,123 @@ type CityTemp struct {
 }
 
 var (
-	cityTempMap = make(map[string]CityTemp)
-	mutex       sync.Mutex
+	cityTempMap sync.Map
 )
 
 func main() {
 	// Record the start time
 	start := time.Now()
 	input, err := os.Open("D:\\Go\\1brc\\measurements.txt")
-
 	if err != nil {
 		panic(err)
 	}
 	defer input.Close()
 
 	fileScanner := bufio.NewScanner(input)
-
 	fileScanner.Split(bufio.ScanLines)
 	pipeline(fileScanner)
+
 	// Record the end time
 	end := time.Now()
 	duration := end.Sub(start)
 
 	// Print the duration
 	fmt.Printf("Execution time: %v\n", duration)
-
 }
-func pipelineStage[IN any, OUT any](input <-chan IN, output chan<- OUT, process func(IN) OUT) {
+
+func pipelineStage[IN any, OUT any](input <-chan IN, output chan<- OUT, process func(IN) OUT, numWorkers int) {
 	defer close(output)
-	for data := range input {
-		output <- process(data)
+	wg := sync.WaitGroup{}
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for data := range input {
+				output <- process(data)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func parse(data string) Record {
-
 	rec, err := newRecord(data)
 	if err != nil {
 		panic(err)
 	}
 	return rec
-
 }
 
 func compute(rec Record) Record {
-	mutex.Lock()
-	defer mutex.Unlock()
-	if val, ok := cityTempMap[rec.City]; ok {
-		if rec.Temperature < val.Min {
-			val.Min = rec.Temperature
-		} else if rec.Temperature > val.Max {
-			val.Max = rec.Temperature
-		}
-		val.Count++
-		val.Avg = ((val.Avg * float64(val.Count-1)) + rec.Temperature) / float64(val.Count)
-		cityTempMap[rec.City] = val
-	} else {
-		cityTempMap[rec.City] = CityTemp{rec.City, rec.Temperature, rec.Temperature, rec.Temperature, 1}
+	val, _ := cityTempMap.LoadOrStore(rec.City, CityTemp{rec.City, rec.Temperature, rec.Temperature, rec.Temperature, 1})
+	cityTemp := val.(CityTemp)
+
+	if rec.Temperature < cityTemp.Min {
+		cityTemp.Min = rec.Temperature
+	} else if rec.Temperature > cityTemp.Max {
+		cityTemp.Max = rec.Temperature
 	}
+	cityTemp.Count++
+	cityTemp.Avg = ((cityTemp.Avg * float64(cityTemp.Count-1)) + rec.Temperature) / float64(cityTemp.Count)
+	cityTempMap.Store(rec.City, cityTemp)
+
 	return rec
 }
 
-func encode(rec Record) []byte {
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	keys := make([]string, 0, len(cityTempMap))
-	for k := range cityTempMap {
-		keys = append(keys, k)
-	}
+func encode() []byte {
+	keys := make([]string, 0)
+	cityTempMap.Range(func(key, value interface{}) bool {
+		keys = append(keys, key.(string))
+		return true
+	})
 	sort.Strings(keys)
-	result := "{"
+	result := ""
 	for i, k := range keys {
-		temp := cityTempMap[k]
+		val, _ := cityTempMap.Load(k)
+		temp := val.(CityTemp)
 		if i > 0 {
-			result += ","
+			result += ";"
 		}
 		result += fmt.Sprintf("%s:%.2f/%.2f/%.2f", temp.City, temp.Min, temp.Avg, temp.Max)
 	}
-	result += "}"
 	return []byte(result)
 }
 
 func newRecord(in string) (rec Record, err error) {
-
 	rec.City = strings.Split(in, ";")[0]
 	rec.Temperature, err = strconv.ParseFloat(strings.Split(in, ";")[1], 64)
 	return rec, err
-
 }
 
 func pipeline(fileScanner *bufio.Scanner) {
-
 	fmt.Println("----Starting Pipeline ----")
-	parseInputCh := make(chan string, 1000)
-	computeCh := make(chan Record, 1000)
-	encodeInput := make(chan Record, 1000)
-	// We read the output of the pipeline from this channel
-	outputCh := make(chan []byte, 1000)
-	// We need this channel to wait for the printing of
-	// the final result
+	parseInputCh := make(chan string, 100)
+	computeCh := make(chan Record, 100)
 	done := make(chan struct{})
-	//start go routine to parse input
 
-	go pipelineStage(parseInputCh, computeCh, parse)
-	go pipelineStage(computeCh, encodeInput, compute)
-	go pipelineStage(encodeInput, outputCh, encode)
+	go pipelineStage(parseInputCh, computeCh, parse, 30)
+	go pipelineStage(computeCh, nil, compute, 30)
 
-	//start go rotuine to read from pipeline output
-
-	//start go rotuine to read from pipeline output
+	// Start a goroutine to signal when processing is done
 	go func() {
-		for data := range outputCh {
-			fmt.Println(string(data))
+		for range computeCh {
+			// Just drain the channel
 		}
 		close(done)
 	}()
 
-	for fileScanner.Scan() {
+	// Start a goroutine to scan the file and feed the parseInputCh channel
+	go func() {
+		for fileScanner.Scan() {
+			parseInputCh <- fileScanner.Text()
+		}
+		// Close the input channel to signal no more data
+		close(parseInputCh)
+	}()
 
-		parseInputCh <- fileScanner.Text()
-
-	}
-	// Wait until the last output is printed
-	close(parseInputCh)
 	<-done
 
+	//result := encode()
+	//fmt.Println(string(result))
+	fmt.Println("----Pipeline Completed ----")
 }
