@@ -64,31 +64,36 @@ func pipelineStage[IN any, OUT any](input <-chan IN, output chan<- OUT, process 
 	wg.Wait()
 }
 
-func parse(data string) Record {
-	rec, err := newRecord(data)
-	if err != nil {
-		panic(err)
+func parse(data []string) []Record {
+	records := make([]Record, len(data))
+	for i, line := range data {
+		rec, err := newRecord(line)
+		if err != nil {
+			panic(err)
+		}
+		records[i] = rec
 	}
-	return rec
+	return records
 }
 
-func compute(rec Record) Record {
-	val, _ := cityTempMap.LoadOrStore(rec.City, CityTemp{rec.City, rec.Temperature, rec.Temperature, rec.Temperature, 1})
-	cityTemp := val.(CityTemp)
+func compute(records []Record) []Record {
+	for _, rec := range records {
+		val, _ := cityTempMap.LoadOrStore(rec.City, CityTemp{rec.City, rec.Temperature, rec.Temperature, rec.Temperature, 1})
+		cityTemp := val.(CityTemp)
 
-	if rec.Temperature < cityTemp.Min {
-		cityTemp.Min = rec.Temperature
-	} else if rec.Temperature > cityTemp.Max {
-		cityTemp.Max = rec.Temperature
+		if rec.Temperature < cityTemp.Min {
+			cityTemp.Min = rec.Temperature
+		} else if rec.Temperature > cityTemp.Max {
+			cityTemp.Max = rec.Temperature
+		}
+		cityTemp.Count++
+		cityTemp.Avg = ((cityTemp.Avg * float64(cityTemp.Count-1)) + rec.Temperature) / float64(cityTemp.Count)
+		cityTempMap.Store(rec.City, cityTemp)
 	}
-	cityTemp.Count++
-	cityTemp.Avg = ((cityTemp.Avg * float64(cityTemp.Count-1)) + rec.Temperature) / float64(cityTemp.Count)
-	cityTempMap.Store(rec.City, cityTemp)
-
-	return rec
+	return records
 }
 
-func encode() []byte {
+func encode() string {
 	keys := make([]string, 0)
 	cityTempMap.Range(func(key, value interface{}) bool {
 		keys = append(keys, key.(string))
@@ -104,7 +109,7 @@ func encode() []byte {
 		}
 		result += fmt.Sprintf("%s:%.2f/%.2f/%.2f", temp.City, temp.Min, temp.Avg, temp.Max)
 	}
-	return []byte(result)
+	return result
 }
 
 func newRecord(in string) (rec Record, err error) {
@@ -115,8 +120,8 @@ func newRecord(in string) (rec Record, err error) {
 
 func pipeline(fileScanner *bufio.Scanner) {
 	fmt.Println("----Starting Pipeline ----")
-	parseInputCh := make(chan string, 100)
-	computeCh := make(chan Record, 100)
+	parseInputCh := make(chan []string, 100)
+	computeCh := make(chan []Record, 100)
 	done := make(chan struct{})
 
 	go pipelineStage(parseInputCh, computeCh, parse, 30)
@@ -132,8 +137,17 @@ func pipeline(fileScanner *bufio.Scanner) {
 
 	// Start a goroutine to scan the file and feed the parseInputCh channel
 	go func() {
+		batchSize := 50
+		batch := make([]string, 0, batchSize)
 		for fileScanner.Scan() {
-			parseInputCh <- fileScanner.Text()
+			batch = append(batch, fileScanner.Text())
+			if len(batch) == batchSize {
+				parseInputCh <- batch
+				batch = make([]string, 0, batchSize)
+			}
+		}
+		if len(batch) > 0 {
+			parseInputCh <- batch
 		}
 		// Close the input channel to signal no more data
 		close(parseInputCh)
@@ -141,7 +155,6 @@ func pipeline(fileScanner *bufio.Scanner) {
 
 	<-done
 
-	//result := encode()
-	//fmt.Println(string(result))
-	fmt.Println("----Pipeline Completed ----")
+	result := encode()
+	fmt.Println(result)
 }
